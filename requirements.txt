@@ -1,4 +1,9 @@
+# Core HTTP
 requests>=2.31.0
-rich>=13.7.0
 urllib3>=2.0.0
+
+# Terminal UI (optional but recommended)
+rich>=13.7.0
+
+# WebSocket support (for terminal RCE module)
 websocket-client>=1.7.0
